@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "description": "Full-stack AI calling console with React frontend and Fastify voice backend.",
+  "license": "SEE LICENSE IN LICENSE",
   "scripts": {
     "dev": "bash scripts/dev.sh",
     "dev:backend": "PORT=3002 npm --prefix ai-caller run dev",

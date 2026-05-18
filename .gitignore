@@ -81,3 +81,14 @@ android-sdk/ -e
 # Environment files
 *.env
 *.env.*
+
+# Local assistant/tool metadata
+.claude/
+.emergent/
+.gitconfig
+
+# Runtime databases
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
