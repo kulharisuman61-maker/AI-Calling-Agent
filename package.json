@@ -1,0 +1,16 @@
+{
+  "name": "ai-calling-main",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Full-stack AI calling console with React frontend and Fastify voice backend.",
+  "scripts": {
+    "dev": "bash scripts/dev.sh",
+    "dev:backend": "PORT=3002 npm --prefix ai-caller run dev",
+    "dev:frontend": "PORT=3001 REACT_APP_CALLING_API_URL=http://localhost:3002 npm --prefix frontend start",
+    "start:backend": "PORT=3002 npm --prefix ai-caller start",
+    "start:frontend": "PORT=3001 REACT_APP_CALLING_API_URL=http://localhost:3002 npm --prefix frontend start",
+    "build": "npm --prefix frontend run build",
+    "test": "npm --prefix ai-caller test",
+    "check": "node --check ai-caller/server.js && node --check ai-caller/routes/callRoutes.js && npm --prefix frontend run build"
+  }
+}

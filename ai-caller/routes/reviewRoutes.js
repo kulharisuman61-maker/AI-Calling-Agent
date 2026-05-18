@@ -1,5 +1,23 @@
 import { getDatabase } from '../database/index.js';
 
+function parseJsonField(value, fallback = {}) {
+  if (!value) return fallback;
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function parseLimit(value, defaultValue = 20, maxValue = 100) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return defaultValue;
+  }
+  return Math.min(parsed, maxValue);
+}
+
 export async function setupReviewRoutes(fastify) {
   // Get pending calls for review
   fastify.get('/api/review/pending', async (request, reply) => {
@@ -28,9 +46,9 @@ export async function setupReviewRoutes(fastify) {
       // Parse JSON fields
       const parsedCalls = calls.map(call => ({
         ...call,
-        timing_metrics: call.timing_metrics ? JSON.parse(call.timing_metrics) : {},
-        audio_metrics: call.audio_metrics ? JSON.parse(call.audio_metrics) : {},
-        conversation_metrics: call.conversation_metrics ? JSON.parse(call.conversation_metrics) : {}
+        timing_metrics: parseJsonField(call.timing_metrics),
+        audio_metrics: parseJsonField(call.audio_metrics),
+        conversation_metrics: parseJsonField(call.conversation_metrics)
       }));
       
       return reply.send({ calls: parsedCalls });
@@ -52,6 +70,14 @@ export async function setupReviewRoutes(fastify) {
       if (!['approved', 'rejected'].includes(status)) {
         return reply.code(400).send({ error: 'Invalid status' });
       }
+
+      const parsedScore = success_score === undefined || success_score === null || success_score === ''
+        ? null
+        : Number(success_score);
+
+      if (parsedScore !== null && (!Number.isFinite(parsedScore) || parsedScore < 0 || parsedScore > 1)) {
+        return reply.code(400).send({ error: 'success_score must be between 0 and 1' });
+      }
       
       const db = getDatabase();
       db.prepare(`
@@ -60,7 +86,7 @@ export async function setupReviewRoutes(fastify) {
             manual_review_notes = ?,
             success_score = ?
         WHERE call_id = ?
-      `).run(status, notes || null, success_score || null, call_id);
+      `).run(status, notes || null, parsedScore, call_id);
       
       console.log(`[REVIEW] Call ${call_id} reviewed: ${status}`);
       
@@ -74,7 +100,7 @@ export async function setupReviewRoutes(fastify) {
   // Get approved calls for RL training
   fastify.get('/api/review/approved', async (request, reply) => {
     try {
-      const limit = parseInt(request.query.limit) || 20;
+      const limit = parseLimit(request.query.limit);
       
       const db = getDatabase();
       const calls = db.prepare(`
@@ -96,8 +122,8 @@ export async function setupReviewRoutes(fastify) {
       
       const parsedCalls = calls.map(call => ({
         ...call,
-        conversation_metrics: call.conversation_metrics ? JSON.parse(call.conversation_metrics) : {},
-        timing_metrics: call.timing_metrics ? JSON.parse(call.timing_metrics) : {}
+        conversation_metrics: parseJsonField(call.conversation_metrics),
+        timing_metrics: parseJsonField(call.timing_metrics)
       }));
       
       return reply.send({ calls: parsedCalls });
@@ -188,6 +214,16 @@ export async function setupReviewRoutes(fastify) {
   </div>
 
   <script>
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, char => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#039;'
+      }[char]));
+    }
+
     async function loadCalls() {
       try {
         const response = await fetch('/api/review/pending');
@@ -203,17 +239,21 @@ export async function setupReviewRoutes(fastify) {
         container.innerHTML = data.calls.map(call => {
           const duration = call.call_duration_seconds || 0;
           const transferred = call.transfer_successful ? '✅ Yes' : '❌ No';
+          const callId = escapeHtml(call.call_id);
+          const leadId = escapeHtml(call.lead_id || 'unknown');
+          const phone = escapeHtml(call.phone_number || 'unknown');
+          const status = escapeHtml(call.call_status || 'unknown');
           
           return \`
-            <div class="call-card" id="call-\${call.call_id}">
+            <div class="call-card" id="call-\${callId}">
               <div class="call-header">
                 <div>
-                  <div class="call-id">Call ID: \${call.call_id}</div>
-                  <div>Lead: \${call.lead_id}</div>
-                  <div>Phone: \${call.phone_number}</div>
+                  <div class="call-id">Call ID: \${callId}</div>
+                  <div>Lead: \${leadId}</div>
+                  <div>Phone: \${phone}</div>
                 </div>
                 <div>
-                  <div>Status: \${call.call_status || 'unknown'}</div>
+                  <div>Status: \${status}</div>
                   <div>Duration: \${duration}s</div>
                 </div>
               </div>
@@ -239,14 +279,14 @@ export async function setupReviewRoutes(fastify) {
               
               <div class="review-form">
                 <label>Success Score (0.0 - 1.0):</label>
-                <input type="number" class="score-input" id="score-\${call.call_id}" 
+                <input type="number" class="score-input" id="score-\${callId}" 
                        min="0" max="1" step="0.1" value="0.5" />
                 <br><br>
                 <label>Review Notes:</label>
-                <textarea id="notes-\${call.call_id}" rows="3" 
+                <textarea id="notes-\${callId}" rows="3" 
                           placeholder="Add any observations about this call..."></textarea>
-                <button class="btn-approve" onclick="submitReview('\${call.call_id}', 'approved')">✅ Approve</button>
-                <button class="btn-reject" onclick="submitReview('\${call.call_id}', 'rejected')">❌ Reject</button>
+                <button class="btn-approve" onclick="submitReview('\${callId}', 'approved')">✅ Approve</button>
+                <button class="btn-reject" onclick="submitReview('\${callId}', 'rejected')">❌ Reject</button>
               </div>
             </div>
           \`;

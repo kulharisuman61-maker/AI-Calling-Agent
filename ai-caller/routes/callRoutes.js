@@ -3,110 +3,218 @@ import { initiateCall, validateAustralianPhoneNumber } from '../services/twilioS
 import { getSignedUrl } from '../services/elevenLabsService.js';
 import { injectPromptVariables, getActivePromptVersion } from '../utils/promptInjection.js';
 import { getDatabase } from '../database/index.js';
+import { getActiveStreams } from '../handlers/mediaStreamHandler.js';
+import {
+  createStreamSession,
+  deletePendingCallContext,
+  getPendingCallContext,
+  savePendingCallContext
+} from '../services/streamSessionStore.js';
 
-export async function setupCallRoutes(fastify) {
-  // Zoho webhook - Initiate outbound call
-  fastify.post('/zoho-webhook', async (request, reply) => {
-    try {
-      const {
-        first_name,
-        lead_notes,
-        phone_number,
-        state,
-        agent_id,
-        lead_id,
-        lead_source,
-        ...additionalFields
-      } = request.body;
-      
-      // Validation
-      if (!phone_number || !lead_id) {
-        return reply.code(400).send({ 
-          error: 'Missing required fields: phone_number, lead_id' 
-        });
-      }
-      
-      // Validate Australian phone number
-      if (!validateAustralianPhoneNumber(phone_number)) {
-        return reply.code(400).send({ 
-          error: 'Invalid Australian phone number format. Expected: +61...' 
-        });
-      }
-      
-      // Generate call ID
-      const callId = uuidv4();
-      
-      // Get active prompt version
-      const db = getDatabase();
-      const promptVersion = getActivePromptVersion(db);
-      
-      if (!promptVersion) {
-        return reply.code(500).send({ error: 'No active prompt version found' });
-      }
-      
-      // Inject variables into prompt
-      const variables = {
-        first_name: first_name || 'there',
-        lead_notes: lead_notes || 'No additional notes',
-        state: state || 'unknown',
-        lead_source: lead_source || 'unknown'
-      };
-      
-      const injectedPrompt = injectPromptVariables(promptVersion.prompt_text, variables);
-      
-      // Store call in database
-      db.prepare(`
-        INSERT INTO calls (
-          call_id, lead_id, call_type, phone_number, prompt_version_id,
-          initiated_at, additional_data
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        callId,
-        lead_id,
-        'outbound',
-        phone_number,
-        promptVersion.version_id,
-        new Date().toISOString(),
-        JSON.stringify(additionalFields)
-      );
-      
-      // Get ElevenLabs signed URL
-      const elevenLabsUrl = await getSignedUrl();
-      
-      // Construct webhook URL
-      const baseUrl = `${request.protocol}://${request.hostname}`;
-      const webhookUrl = `${baseUrl}/outbound-call-twiml?callId=${callId}&promptVersionId=${promptVersion.version_id}&leadId=${lead_id}&injectedPrompt=${encodeURIComponent(injectedPrompt)}&elevenLabsUrl=${encodeURIComponent(elevenLabsUrl)}`;
-      
-      // Initiate Twilio call
-      const call = await initiateCall(phone_number, webhookUrl, callId, promptVersion.version_id, lead_id);
-      
-      // Update with call_sid
-      db.prepare('UPDATE calls SET call_sid = ? WHERE call_id = ?').run(call.sid, callId);
-      
-      console.log(`[OUTBOUND CALL] Initiated for ${phone_number}, callId: ${callId}`);
-      
-      return reply.send({
-        success: true,
-        call_sid: call.sid,
-        call_id: callId
-      });
-      
-    } catch (error) {
-      console.error('[OUTBOUND CALL] Error:', error);
-      return reply.code(500).send({ 
-        error: 'Failed to initiate call',
-        message: error.message 
+function parseJsonField(value, fallback = {}) {
+  if (!value) return fallback;
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function parseLimit(value, defaultValue = 25, maxValue = 100) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return defaultValue;
+  }
+  return Math.min(parsed, maxValue);
+}
+
+async function createOutboundCall(request, reply) {
+  try {
+    const {
+      first_name,
+      lead_notes,
+      phone_number,
+      state,
+      agent_id,
+      lead_id,
+      lead_source,
+      ...additionalFields
+    } = request.body;
+
+    if (!phone_number || !lead_id) {
+      return reply.code(400).send({
+        error: 'Missing required fields: phone_number, lead_id'
       });
     }
+
+    if (!validateAustralianPhoneNumber(phone_number)) {
+      return reply.code(400).send({
+        error: 'Invalid Australian phone number format. Expected: +61...'
+      });
+    }
+
+    const callId = uuidv4();
+    const db = getDatabase();
+    const promptVersion = getActivePromptVersion(db);
+
+    if (!promptVersion) {
+      return reply.code(500).send({ error: 'No active prompt version found' });
+    }
+
+    const variables = {
+      first_name: first_name || 'there',
+      lead_notes: lead_notes || 'No additional notes',
+      state: state || 'unknown',
+      lead_source: lead_source || 'unknown'
+    };
+
+    const injectedPrompt = injectPromptVariables(promptVersion.prompt_text, variables);
+
+    db.prepare(`
+      INSERT INTO calls (
+        call_id, lead_id, call_type, phone_number, prompt_version_id,
+        initiated_at, additional_data
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      callId,
+      lead_id,
+      'outbound',
+      phone_number,
+      promptVersion.version_id,
+      new Date().toISOString(),
+      JSON.stringify({ agent_id, first_name, state, lead_source, lead_notes, ...additionalFields })
+    );
+
+    savePendingCallContext(callId, {
+      callId,
+      promptVersionId: promptVersion.version_id,
+      leadId: lead_id,
+      injectedPrompt
+    });
+
+    const baseUrl = `${request.protocol}://${request.hostname}`;
+    const webhookUrl = `${baseUrl}/outbound-call-twiml?callId=${encodeURIComponent(callId)}`;
+    let call;
+
+    try {
+      call = await initiateCall(phone_number, webhookUrl, callId, promptVersion.version_id, lead_id);
+    } catch (error) {
+      deletePendingCallContext(callId);
+      db.prepare('UPDATE calls SET call_status = ? WHERE call_id = ?').run('failed', callId);
+      throw error;
+    }
+
+    db.prepare('UPDATE calls SET call_sid = ?, call_status = ? WHERE call_id = ?').run(
+      call.sid,
+      call.status || 'initiated',
+      callId
+    );
+
+    console.log(`[OUTBOUND CALL] Initiated for ${phone_number}, callId: ${callId}`);
+
+    return reply.send({
+      success: true,
+      call_sid: call.sid,
+      call_id: callId,
+      status: call.status || 'initiated'
+    });
+  } catch (error) {
+    console.error('[OUTBOUND CALL] Error:', error);
+    return reply.code(500).send({
+      error: 'Failed to initiate call',
+      message: error.message
+    });
+  }
+}
+
+export async function setupCallRoutes(fastify) {
+  fastify.get('/api/calls', async (request, reply) => {
+    try {
+      const db = getDatabase();
+      const limit = parseLimit(request.query.limit);
+      const calls = db.prepare(`
+        SELECT
+          call_id,
+          call_sid,
+          lead_id,
+          call_type,
+          phone_number,
+          initiated_at,
+          answered_at,
+          ended_at,
+          call_status,
+          transfer_successful,
+          call_duration_seconds,
+          manual_review_status,
+          success_score,
+          additional_data
+        FROM calls
+        ORDER BY COALESCE(initiated_at, created_at) DESC
+        LIMIT ?
+      `).all(limit);
+
+      return reply.send({
+        calls: calls.map(call => ({
+          ...call,
+          additional_data: parseJsonField(call.additional_data)
+        }))
+      });
+    } catch (error) {
+      console.error('[CALLS] Error fetching calls:', error);
+      return reply.code(500).send({ error: 'Failed to fetch calls' });
+    }
   });
+
+  fastify.get('/api/dashboard/summary', async (request, reply) => {
+    try {
+      const db = getDatabase();
+      const totals = db.prepare(`
+        SELECT
+          COUNT(*) as total_calls,
+          SUM(CASE WHEN call_type = 'outbound' THEN 1 ELSE 0 END) as outbound_calls,
+          SUM(CASE WHEN call_type = 'inbound' THEN 1 ELSE 0 END) as inbound_calls,
+          SUM(CASE WHEN transfer_successful = 1 THEN 1 ELSE 0 END) as transfers,
+          AVG(call_duration_seconds) as avg_duration,
+          SUM(CASE WHEN manual_review_status = 'pending' THEN 1 ELSE 0 END) as pending_reviews
+        FROM calls
+      `).get();
+      const activePrompt = getActivePromptVersion(db);
+
+      return reply.send({
+        ...totals,
+        transfer_rate: totals.total_calls > 0 ? totals.transfers / totals.total_calls : 0,
+        active_calls: getActiveStreams().size,
+        active_prompt: activePrompt
+          ? {
+              version_id: activePrompt.version_id,
+              version_number: activePrompt.version_number
+            }
+          : null
+      });
+    } catch (error) {
+      console.error('[DASHBOARD] Error fetching summary:', error);
+      return reply.code(500).send({ error: 'Failed to fetch dashboard summary' });
+    }
+  });
+
+  fastify.post('/api/calls/outbound', createOutboundCall);
+
+  // Zoho webhook - Initiate outbound call
+  fastify.post('/zoho-webhook', createOutboundCall);
   
   // TwiML endpoint for outbound calls
   fastify.get('/outbound-call-twiml', async (request, reply) => {
     try {
-      const { callId, promptVersionId, leadId, injectedPrompt, elevenLabsUrl } = request.query;
+      const { callId } = request.query;
       
       if (!callId) {
         return reply.code(400).send({ error: 'Missing callId' });
+      }
+
+      const pendingContext = getPendingCallContext(callId);
+      if (!pendingContext) {
+        return reply.code(404).send({ error: 'Call context expired or not found' });
       }
       
       // Update database
@@ -117,9 +225,16 @@ export async function setupCallRoutes(fastify) {
         WHERE call_id = ?
       `).run(new Date().toISOString(), callId);
       
-      // Generate TwiML with Stream
-      const baseUrl = `${request.protocol}://${request.hostname}`;
-      const streamUrl = `wss://${request.hostname}/outbound-media-stream?callId=${callId}&promptVersionId=${promptVersionId}&leadId=${leadId}&injectedPrompt=${encodeURIComponent(injectedPrompt)}&elevenLabsUrl=${encodeURIComponent(elevenLabsUrl)}&callSid=${request.query.CallSid || 'unknown'}`;
+      const elevenLabsUrl = await getSignedUrl();
+      const sessionId = createStreamSession({
+        ...pendingContext,
+        elevenLabsUrl,
+        callSid: request.query.CallSid || 'unknown'
+      });
+      deletePendingCallContext(callId);
+
+      // Generate TwiML with Stream. Keep sensitive prompt and signed URLs out of query strings.
+      const streamUrl = `wss://${request.hostname}/outbound-media-stream?sessionId=${encodeURIComponent(sessionId)}`;
       
       const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -174,10 +289,17 @@ export async function setupCallRoutes(fastify) {
       
       // Get ElevenLabs URL
       const elevenLabsUrl = await getSignedUrl();
+      const sessionId = createStreamSession({
+        callId,
+        promptVersionId: promptVersion.version_id,
+        leadId: 'inbound',
+        injectedPrompt,
+        elevenLabsUrl,
+        callSid: CallSid
+      });
       
       // Generate TwiML
-      const baseUrl = `${request.protocol}://${request.hostname}`;
-      const streamUrl = `wss://${request.hostname}/outbound-media-stream?callId=${callId}&promptVersionId=${promptVersion.version_id}&leadId=inbound&injectedPrompt=${encodeURIComponent(injectedPrompt)}&elevenLabsUrl=${encodeURIComponent(elevenLabsUrl)}&callSid=${CallSid}`;
+      const streamUrl = `wss://${request.hostname}/outbound-media-stream?sessionId=${encodeURIComponent(sessionId)}`;
       
       const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>

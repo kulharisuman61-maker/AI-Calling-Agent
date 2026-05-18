@@ -3,17 +3,21 @@ import { mulawToPcm16, pcm16ToMulaw } from '../utils/audioConversion.js';
 import { createElevenLabsConnection, buildConversationConfig } from '../services/elevenLabsService.js';
 import { transferCall, hangupCall } from '../services/twilioService.js';
 import { getDatabase } from '../database/index.js';
+import { deleteStreamSession, getStreamSession } from '../services/streamSessionStore.js';
 
 const activeStreams = new Map();
 
 export function handleMediaStream(connection, request) {
-  const { callId, promptVersionId, leadId, injectedPrompt, callSid } = request.query;
+  const { sessionId } = request.query;
+  const session = getStreamSession(sessionId);
   
-  if (!callId || !promptVersionId || !injectedPrompt) {
-    console.error('[MEDIA STREAM] Missing required parameters');
+  if (!sessionId || !session) {
+    console.error('[MEDIA STREAM] Missing or expired stream session');
     connection.close();
     return;
   }
+
+  const { callId, promptVersionId, injectedPrompt, callSid, elevenLabsUrl } = session;
   
   const metrics = new CallMetrics(callId);
   metrics.addTimestamp('websocketConnected');
@@ -23,6 +27,7 @@ export function handleMediaStream(connection, request) {
   let elevenLabsReady = false;
   let audioBuffer = [];
   let reconnectAttempts = 0;
+  let cleanedUp = false;
   
   console.log(`[MEDIA STREAM] Started for call ${callId}`);
   
@@ -40,7 +45,6 @@ export function handleMediaStream(connection, request) {
           streamSid = msg.streamSid;
           console.log(`[MEDIA STREAM] Stream started: ${streamSid}`);
           
-          // Connect to ElevenLabs
           await connectToElevenLabs(injectedPrompt);
           break;
           
@@ -52,12 +56,13 @@ export function handleMediaStream(connection, request) {
             const mulawData = Buffer.from(msg.media.payload, 'base64');
             const pcm16Data = mulawToPcm16(mulawData);
             
-            // Send to ElevenLabs if ready
             if (elevenLabsWs && elevenLabsReady) {
               const base64Audio = Buffer.from(pcm16Data.buffer).toString('base64');
               elevenLabsWs.send(JSON.stringify({
                 user_audio_chunk: base64Audio
               }));
+            } else {
+              audioBuffer.push(Buffer.from(pcm16Data.buffer).toString('base64'));
             }
           }
           break;
@@ -76,8 +81,7 @@ export function handleMediaStream(connection, request) {
   
   async function connectToElevenLabs(prompt) {
     try {
-      const signedUrl = request.query.elevenLabsUrl; // Passed from route
-      elevenLabsWs = createElevenLabsConnection(signedUrl);
+      elevenLabsWs = createElevenLabsConnection(elevenLabsUrl);
       metrics.addTimestamp('elevenLabsConnected');
       
       elevenLabsWs.on('open', () => {
@@ -232,6 +236,11 @@ export function handleMediaStream(connection, request) {
   }
   
   function cleanup() {
+    if (cleanedUp) {
+      return;
+    }
+    cleanedUp = true;
+
     if (elevenLabsWs) {
       elevenLabsWs.close();
     }
@@ -262,6 +271,7 @@ export function handleMediaStream(connection, request) {
     }
     
     activeStreams.delete(callId);
+    deleteStreamSession(sessionId);
   }
   
   connection.on('close', cleanup);

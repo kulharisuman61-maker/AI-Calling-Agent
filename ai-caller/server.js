@@ -136,6 +136,9 @@ try {
   await fastify.listen({ port: PORT, host: HOST });
   console.log(`[SERVER] AI Caller System running on http://${HOST}:${PORT}`);
   console.log('[SERVER] Endpoints:');
+  console.log('  GET  /api/dashboard/summary - Dashboard metrics');
+  console.log('  GET  /api/calls - Recent calls');
+  console.log('  POST /api/calls/outbound - Initiate outbound call from frontend');
   console.log('  POST /zoho-webhook - Initiate outbound call');
   console.log('  POST /inbound-call - Handle inbound calls');
   console.log('  GET  /review-dashboard - Manual review interface');

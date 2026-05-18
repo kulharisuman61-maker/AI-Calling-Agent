@@ -5,7 +5,7 @@ export function injectPromptVariables(promptTemplate, variables) {
     const placeholder = `{{${key}}}`;
     injectedPrompt = injectedPrompt.replace(
       new RegExp(placeholder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'),
-      value || ''
+      () => String(value || '')
     );
   }
   

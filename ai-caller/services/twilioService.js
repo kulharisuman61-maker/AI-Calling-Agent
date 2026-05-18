@@ -5,6 +5,16 @@ dotenv.config();
 
 let twilioClient = null;
 
+function escapeXml(value) {
+  return String(value ?? '').replace(/[<>&"']/g, (char) => ({
+    '<': '&lt;',
+    '>': '&gt;',
+    '&': '&amp;',
+    '"': '&quot;',
+    "'": '&apos;'
+  }[char]));
+}
+
 export function initTwilioClient() {
   const accountSid = process.env.TWILIO_ACCOUNT_SID;
   const authToken = process.env.TWILIO_AUTH_TOKEN;
@@ -65,13 +75,17 @@ export async function initiateCall(to, webhookUrl, callId, promptVersionId, lead
 
 export async function transferCall(callSid, transferNumber, transferUrl) {
   const client = getTwilioClient();
+
+  if (!transferNumber) {
+    throw new Error('SALES_TEAM_NUMBER not set');
+  }
   
   try {
     const call = await client.calls(callSid).update({
       twiml: `<Response>
         <Say>Transferring you to our sales specialist now.</Say>
-        <Dial timeout="30" action="${transferUrl}">
-          <Number>${transferNumber}</Number>
+        <Dial timeout="30" action="${escapeXml(transferUrl)}">
+          <Number>${escapeXml(transferNumber)}</Number>
         </Dial>
       </Response>`
     });
