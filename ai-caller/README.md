@@ -483,7 +483,9 @@ HOST=0.0.0.0
 
 ## License
 
-Proprietary - All rights reserved
+View-only proprietary license. This repository is provided for viewing only.
+Downloading, copying, installing, running, using, modifying, distributing, or
+creating derivative works is not permitted without prior written permission.
 
 ## Contact
 
